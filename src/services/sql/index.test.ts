@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyWilayahConfig, extractSqlTitle } from ".";
+import { applyWilayahConfig, extractSqlTitle, formatRunProgress } from ".";
 
 it.each(["Nama Tabel", "Judul", "Judul Tabel", "nama tabel", "JUDUL TABEL"])("reads the %s metadata alias", (label) => {
   expect(extractSqlTitle(`/*\n  ${label}: Konsistensi Hortikultura KBLI 02101 - Pengelolaan Hutan\n Creator: Susanto\n*/\nSELECT 1;`, "q_1.sql"))
@@ -58,5 +58,60 @@ describe("SQL metadata and wilayah parameters", () => {
     const prepared = applyWilayahConfig(variants, { level1: ["32", "35"], level2: [] });
     expect(prepared).toContain("CONCAT('|', pw.filter_provinsi, '|') LIKE CONCAT('%|', CAST(ur.level_1_full_code AS CHAR), '|%')");
     expect(prepared).toContain("CONCAT('|', pw.filter_provinsi, '|') LIKE CONCAT('%|', ba.level_1_full_code, '|%')");
+  });
+});
+
+describe("formatRunProgress", () => {
+  it("formats running state with offset and limit", () => {
+    expect(formatRunProgress({
+      runId: "1",
+      path: "test.sql",
+      iteration: 1,
+      state: "running",
+      rowsCollected: 0,
+      offset: 0,
+      limit: 9000,
+    })).toBe("⏳ Batch ke-1 (baris 1–9.000) sedang diambil · 0 baris terkumpul");
+  });
+
+  it("formats running state for subsequent pagination batches", () => {
+    expect(formatRunProgress({
+      runId: "1",
+      path: "test.sql",
+      iteration: 2,
+      state: "running",
+      rowsCollected: 9000,
+      offset: 9000,
+      limit: 9000,
+    })).toBe("⏳ Batch ke-2 (baris 9.001–18.000) sedang diambil · 9.000 baris terkumpul");
+  });
+
+  it("formats completed state with batchRows count", () => {
+    expect(formatRunProgress({
+      runId: "1",
+      path: "test.sql",
+      iteration: 1,
+      state: "completed",
+      rowsCollected: 9000,
+      batchRows: 9000,
+    })).toBe("✓ Batch ke-1 selesai (+9.000 baris) · 9.000 baris terkumpul");
+  });
+
+  it("formats fallback running and completed without optional fields", () => {
+    expect(formatRunProgress({
+      runId: "1",
+      path: "test.sql",
+      iteration: 3,
+      state: "running",
+      rowsCollected: 18000,
+    })).toBe("⏳ Batch ke-3 sedang berjalan · 18.000 baris terkumpul");
+
+    expect(formatRunProgress({
+      runId: "1",
+      path: "test.sql",
+      iteration: 3,
+      state: "completed",
+      rowsCollected: 20000,
+    })).toBe("✓ Batch ke-3 selesai · 20.000 baris terkumpul");
   });
 });

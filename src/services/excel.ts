@@ -1,4 +1,5 @@
 import ExcelJS from "exceljs";
+import { saveFileToDestination } from "./output-destination";
 
 export function sheetName(filename: string, used: string[], title = ""): string {
   const fallback = filename.replace(/\.sql$/i, "").trim() || "Hasil";
@@ -80,9 +81,10 @@ export function buildWorkbook(results: QueryResult[]): ExcelJS.Workbook {
   return workbook;
 }
 
-export function workbookFilename(path: string): string {
+export function workbookFilename(path: string, isPartial = false): string {
   const folder = path.replace(/^\/+|\/+$/g, "") || "Query";
-  return `${folder.replace(/[^a-z0-9_-]/gi, "_")}.xlsx`;
+  const base = folder.replace(/[^a-z0-9_-]/gi, "_");
+  return isPartial ? `${base}_partial.xlsx` : `${base}.xlsx`;
 }
 
 export async function serializeWorkbook(results: QueryResult[]): Promise<Uint8Array> {
@@ -90,15 +92,21 @@ export async function serializeWorkbook(results: QueryResult[]): Promise<Uint8Ar
   return new Uint8Array(await workbook.xlsx.writeBuffer());
 }
 
-export async function exportFolder(path: string, results: QueryResult[]): Promise<void> {
-  await downloadWorkbook(path, await serializeWorkbook(results));
+export async function exportFolder(path: string, results: QueryResult[], options?: { isPartial?: boolean }): Promise<void> {
+  await downloadWorkbook(path, await serializeWorkbook(results), options?.isPartial);
 }
 
-export async function downloadWorkbook(path: string, buffer: Uint8Array): Promise<void> {
-  const url = URL.createObjectURL(new Blob([new Uint8Array(buffer)], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
-  try {
-    await chrome.downloads.download({ url, filename: workbookFilename(path), saveAs: false, conflictAction: "uniquify" });
-  } finally {
-    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-  }
+const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+export async function downloadWorkbook(path: string, buffer: Uint8Array, isPartial = false): Promise<void> {
+  await saveFileToDestination(workbookFilename(path, isPartial), buffer, XLSX_MIME);
 }
+
+export async function downloadStandardWorkbook(path: string, buffer: Uint8Array): Promise<void> {
+  let relativePath = path.replace(/^\/+/, "").trim();
+  if (!relativePath.toLowerCase().endsWith(".xlsx")) {
+    relativePath = `${relativePath}.xlsx`;
+  }
+  await saveFileToDestination(relativePath, buffer, XLSX_MIME);
+}
+

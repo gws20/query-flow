@@ -1,4 +1,4 @@
-import type { WilayahConfig } from "../../types";
+import type { SqlRunProgress, WilayahConfig } from "../../types";
 
 const PARAMETER_VALUE = (alias: string): RegExp =>
   new RegExp(`'(?:''|[^'])*'\\s+AS\\s+${alias}\\b`, "i");
@@ -7,6 +7,23 @@ export function extractSqlTitle(sql: string, fallback: string): string {
   const comment = sql.match(/\/\*([\s\S]*?)\*\//)?.[1];
   const title = comment?.match(/^[\t ]*(?:\*[\t ]*)?(?:Nama[\t ]+Tabel|Judul[\t ]+Tabel|Judul)[\t ]*:[\t ]*(\S[^\r\n]*)/im)?.[1]?.trim();
   return title || fallback.replace(/\.sql$/i, "");
+}
+
+export function formatRunProgress(progress: SqlRunProgress): string {
+  const rows = new Intl.NumberFormat("id-ID").format(progress.rowsCollected);
+  if (progress.state === "running") {
+    if (progress.offset !== undefined && progress.limit !== undefined) {
+      const from = new Intl.NumberFormat("id-ID").format(progress.offset + 1);
+      const to = new Intl.NumberFormat("id-ID").format(progress.offset + progress.limit);
+      return `⏳ Batch ke-${progress.iteration} (baris ${from}–${to}) sedang diambil · ${rows} baris terkumpul`;
+    }
+    return `⏳ Batch ke-${progress.iteration} sedang berjalan · ${rows} baris terkumpul`;
+  }
+  if (progress.batchRows !== undefined && progress.batchRows > 0) {
+    const batch = new Intl.NumberFormat("id-ID").format(progress.batchRows);
+    return `✓ Batch ke-${progress.iteration} selesai (+${batch} baris) · ${rows} baris terkumpul`;
+  }
+  return `✓ Batch ke-${progress.iteration} selesai · ${rows} baris terkumpul`;
 }
 
 export function applyWilayahConfig(sql: string, config: WilayahConfig): string {

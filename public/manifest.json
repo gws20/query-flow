@@ -2,9 +2,10 @@
   "manifest_version": 3,
   "name": "QueryFlow",
   "description": "Import, parameterisasi, batch execution SQL, dan ekspor hasil SQL Lab ke Excel.",
-  "version": "0.3.4",
-  "permissions": ["storage", "tabs", "sidePanel", "scripting", "clipboardWrite", "downloads"],
-  "host_permissions": ["https://git.bps.go.id/*", "https://fasih-dashboard.bps.go.id/*"],
+  "version": "0.3.5",
+  "version_name": "0.3.5-forkgin",
+  "permissions": ["storage", "unlimitedStorage", "tabs", "sidePanel", "scripting", "clipboardWrite", "downloads", "cookies"],
+  "host_permissions": ["https://git.bps.go.id/*", "https://fasih-dashboard.bps.go.id/*", "https://transdata-cloud.bps.go.id/*", "https://sso.bps.go.id/*"],
   "background": {
     "service_worker": "assets/background.js",
     "type": "module"
@@ -17,7 +18,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://git.bps.go.id/*", "https://fasih-dashboard.bps.go.id/*"],
+      "matches": ["https://git.bps.go.id/*", "https://fasih-dashboard.bps.go.id/*", "https://transdata-cloud.bps.go.id/*"],
       "js": ["assets/content.js"],
       "run_at": "document_idle"
     }
@@ -25,11 +26,19 @@
   "side_panel": {
     "default_path": "sidepanel.html"
   },
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/*"],
+      "matches": ["https://*/*", "http://*/*"]
+    }
+  ],
   "action": {
     "default_title": "Buka QueryFlow",
     "default_icon": {
-      "16": "icons/queryflow-idle-16.png",
-      "32": "icons/queryflow-idle-32.png"
+      "16": "icons/queryflow-active-16.png",
+      "32": "icons/queryflow-active-32.png",
+      "48": "icons/queryflow-active-48.png",
+      "128": "icons/queryflow-active-128.png"
     }
   }
 }

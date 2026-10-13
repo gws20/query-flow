@@ -51,4 +51,26 @@ export async function saveWilayah(config: WilayahConfig): Promise<void> {
   await chrome.storage.local.set({ [WILAYAH_KEY]: config });
 }
 
-export const storageKeys = { snapshot: SNAPSHOT_KEY, wilayah: WILAYAH_KEY } as const;
+export const FOLDER_CONFIGS_KEY = "folderConfigs";
+
+export interface StoredFolderConfig {
+  selectedPaths?: string[];
+  advancedSettings?: boolean;
+  startRow?: number;
+  maxRows?: number;
+  checkpointRows?: number;
+  splitColumns?: string[];
+  splitEnabled?: boolean;
+}
+
+export async function loadFolderConfigs(): Promise<Record<string, StoredFolderConfig>> {
+  const stored = await chrome.storage.local.get(FOLDER_CONFIGS_KEY);
+  const value = stored[FOLDER_CONFIGS_KEY];
+  return value && typeof value === "object" ? (value as Record<string, StoredFolderConfig>) : {};
+}
+
+export async function saveFolderConfigs(configs: Record<string, StoredFolderConfig>): Promise<void> {
+  await chrome.storage.local.set({ [FOLDER_CONFIGS_KEY]: configs });
+}
+
+export const storageKeys = { snapshot: SNAPSHOT_KEY, wilayah: WILAYAH_KEY, folderConfigs: FOLDER_CONFIGS_KEY } as const;

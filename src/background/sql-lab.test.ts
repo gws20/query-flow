@@ -19,15 +19,21 @@ function setup(data: Record<string, unknown>[], state = "success") {
 }
 
 it("returns a bounded prefix and signals more data even below the requested row count", async () => {
-  setup(Array.from({ length: 4 }, () => ({ id: "é".repeat(400_000) })));
+  const { run } = setup(Array.from({ length: 4 }, () => ({ id: "é".repeat(400_000) })));
   const promise = runInSqlLabChunk("select id from t", "run", "a.sql", 0, 9000, 1);
   await vi.advanceTimersByTimeAsync(300);
   const response = await promise;
   expect(response.ok).toBe(true);
   if (!response.ok) return;
   expect(response.rows).toHaveLength(2);
-  expect(response.hasMore).toBe(true);
+  expect(response.hasMore).toBe(false);
+  expect(response.continuation).toBe(true);
   expect(new TextEncoder().encode(JSON.stringify(response)).byteLength).toBeLessThan(2 * 1024 * 1024);
+
+  const continuation = await runInSqlLabChunk("select id from t", "run", "a.sql", 0, 9000, 2);
+  expect(continuation).toMatchObject({ ok: true, continuation: false, hasMore: false });
+  if (continuation.ok) expect(continuation.rows).toHaveLength(2);
+  expect(run.click).toHaveBeenCalledTimes(1);
 });
 
 it("does not report a timed-out identified query as a successful empty result", async () => {

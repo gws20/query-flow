@@ -59,3 +59,26 @@ it("uses Chrome downloads for automatic parts and reports download rejection", a
   expect(download).toHaveBeenCalledWith({ url: "blob:test", filename: "folder_part-001.xlsx", saveAs: false, conflictAction: "uniquify" });
   await expect(exportFolder("folder_partial", results)).rejects.toThrow("Download rejected");
 });
+
+it("supports structured subfolder paths with downloadStandardWorkbook", async () => {
+  const download = vi.fn().mockResolvedValue(123);
+  vi.stubGlobal("chrome", { downloads: { download } });
+  vi.stubGlobal("window", { setTimeout: vi.fn() });
+  vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:test-standard");
+
+  const { downloadStandardWorkbook } = await import("./excel");
+  await downloadStandardWorkbook("2026-10-03/Mikro/Kategori A/[Tabel 1a] Penduduk", new Uint8Array([1, 2, 3]));
+  expect(download).toHaveBeenCalledWith({
+    url: "blob:test-standard",
+    filename: "2026-10-03/Mikro/Kategori A/[Tabel 1a] Penduduk.xlsx",
+    saveAs: false,
+    conflictAction: "uniquify",
+  });
+});
+
+it("generates correct workbook filenames for standard and partial exports", async () => {
+  const { workbookFilename } = await import("./excel");
+  expect(workbookFilename("Agregat/Kategori_A")).toBe("Agregat_Kategori_A.xlsx");
+  expect(workbookFilename("Agregat/Kategori_A", true)).toBe("Agregat_Kategori_A_partial.xlsx");
+});
+

@@ -60,6 +60,59 @@ export interface SqlRunProgress {
   state: "running" | "completed";
   rowsCollected: number;
   batchRows?: number;
+  offset?: number;
+  limit?: number;
+}
+
+export interface SqlRunOptions {
+  startRow?: number;
+  maxRows?: number;
+}
+
+export interface SqlRunResult {
+  ok: boolean;
+  message: string;
+  columns?: string[];
+  rows?: unknown[][];
+  partial?: boolean;
+}
+
+export interface FolderRunConfig {
+  selectedPaths: string[];
+  startRow?: number;
+  maxRows?: number;
+}
+
+export interface TransdataSession {
+  userId: string;
+  requestToken: string;
+  lastDetected?: string;
+}
+
+export interface RemoteDavItem {
+  name: string;
+  path: string; // e.g. "SE2026/3507" or ""
+  href: string;
+  isDirectory: boolean;
+  size?: number;
+  lastModified?: string;
+}
+
+export interface LocalFileNode {
+  name: string;
+  relativePath: string;
+  isDirectory: boolean;
+  size?: number;
+  children?: LocalFileNode[];
+}
+
+export interface TransdataUploadProgress {
+  state: "idle" | "uploading" | "completed" | "error" | "cancelled";
+  currentFile?: string;
+  currentFileIndex: number;
+  totalFiles: number;
+  bytesUploaded?: number;
+  message: string;
 }
 
 export type ExtensionMessage =
@@ -69,12 +122,14 @@ export type ExtensionMessage =
   | { type: "SQL_RUN_PROGRESS"; progress: SqlRunProgress }
   | { type: "SYNC_REPOSITORY" }
   | { type: "SYNC_PROGRESS"; progress: SyncProgress }
-  | { type: "GITLAB_SCAN" };
+  | { type: "GITLAB_SCAN" }
+  | { type: "TRANSDATA_SESSION_DETECTED"; session: TransdataSession };
 
 export type ScanResult =
   | { ok: true; snapshot: RepositorySnapshot }
   | { ok: false; error: string };
 
 export type SqlChunkResponse =
-  | { ok: true; message: string; columns: string[]; rows: unknown[][]; hasMore: boolean }
+  | { ok: true; message: string; columns: string[]; rows: unknown[][]; hasMore: boolean; continuation?: boolean; pageSize?: number }
   | { ok: false; message: string };
+

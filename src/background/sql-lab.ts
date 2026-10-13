@@ -2,8 +2,12 @@ import type { SqlChunkResponse } from "../types";
 
 /** Executes one bounded page in MAIN world. All runtime helpers must remain inside this function. */
 export async function runInSqlLabChunk(baseSql: string, runId: string, path: string, offset: number, limit: number, iteration: number): Promise<SqlChunkResponse> {
-  const runtimeWindow = window as typeof window & { __queryFlowCancelledRuns?: Record<string, boolean> };
+  const runtimeWindow = window as typeof window & {
+    __queryFlowCancelledRuns?: Record<string, boolean>;
+    __queryFlowPageCursors?: Record<string, { offset: number; queryId: string; nextRow: number; pageEnd: number; hasMore: boolean }>;
+  };
   runtimeWindow.__queryFlowCancelledRuns ??= {};
+  runtimeWindow.__queryFlowPageCursors ??= {};
 
   function throwIfCancelled(): void {
     if (runtimeWindow.__queryFlowCancelledRuns?.[runId]) {
@@ -56,23 +60,60 @@ export async function runInSqlLabChunk(baseSql: string, runId: string, path: str
     return rendered === "[object Object]" ? value : rendered;
   }
 
-  // Apply the intelligent top-level ORDER BY check before starting pagination loops
+  // Preserve explicit ordering; fall back to output-column order for stable pagination.
   const preparedSql = ensureOrderBy(baseSql);
   const cleanSql = preparedSql.trim().replace(/;$/, "");
 
-  function reportProgress(state: "running" | "completed", iteration: number, rowsCollected: number, batchRows?: number): void {
+  function reportProgress(
+    state: "running" | "completed",
+    iter: number,
+    rowsCollected: number,
+    batchRows?: number,
+    chunkOffset?: number,
+    chunkLimit?: number,
+  ): void {
     window.postMessage({
       source: "queryflow-sql-run-progress",
-      progress: { runId, path, iteration, state, rowsCollected, batchRows },
+      progress: {
+        runId,
+        path,
+        iteration: iter,
+        state,
+        rowsCollected,
+        batchRows,
+        offset: chunkOffset,
+        limit: chunkLimit,
+      },
     }, window.location.origin);
   }
 
   type Query = { id?: string; sql?: string; state?: string; errorMessage?: string; results?: { columns?: { name: string }[]; data?: Record<string, unknown>[] }; rows?: number };
   type Store = { getState(): { sqlLab?: { queries?: Record<string, Query> } } };
 
+  function takeRows(columns: string[], data: Record<string, unknown>[], start: number, end: number): unknown[][] {
+    const rows: unknown[][] = [];
+    const encoder = new TextEncoder();
+    const maxBytes = 2 * 1024 * 1024;
+    let bytes = encoder.encode(JSON.stringify(columns)).byteLength + 4096;
+    if (bytes >= maxBytes) throw new Error("Header hasil melebihi batas transfer 2 MiB.");
+    for (let index = start; index < end; index++) {
+      const row = data[index];
+      if (!row) break;
+      const values = columns.map((name) => normalizeResultValue(row[name] ?? null));
+      const rowBytes = encoder.encode(JSON.stringify(values)).byteLength + 1;
+      if (bytes + rowBytes > maxBytes) {
+        if (rows.length === 0) throw new Error("Satu baris melebihi batas transfer 2 MiB.");
+        break;
+      }
+      rows.push(values);
+      bytes += rowBytes;
+    }
+    return rows;
+  }
+
   {
     const paginatedSql = `${cleanSql} LIMIT ${limit} OFFSET ${offset};`;
-    reportProgress("running", iteration, offset);
+    reportProgress("running", iteration, offset, undefined, offset, limit);
 
     try {
       throwIfCancelled();
@@ -89,6 +130,29 @@ export async function runInSqlLabChunk(baseSql: string, runId: string, path: str
         if (store) break;
       }
       if (!store) throw new Error("State hasil SQL Lab belum dikenali. Run dibatalkan.");
+
+      const pageCursor = runtimeWindow.__queryFlowPageCursors?.[runId];
+      if (pageCursor?.offset === offset) {
+        const query = store.getState().sqlLab?.queries?.[pageCursor.queryId];
+        const columns = query?.results?.columns?.map((column) => column.name);
+        const data = query?.results?.data;
+        if (!columns || !Array.isArray(data)) throw new Error("Hasil SQL Lab untuk chunk lanjutan sudah tidak tersedia.");
+        const batchRows = takeRows(columns, data, pageCursor.nextRow, pageCursor.pageEnd);
+        if (batchRows.length === 0) throw new Error("Chunk lanjutan tidak menghasilkan baris.");
+        pageCursor.nextRow += batchRows.length;
+        const continuation = pageCursor.nextRow < pageCursor.pageEnd;
+        if (!continuation) delete runtimeWindow.__queryFlowPageCursors?.[runId];
+        reportProgress("completed", iteration, offset + pageCursor.nextRow, batchRows.length, offset, limit);
+        return {
+          ok: true,
+          message: "Chunk diterima.",
+          columns,
+          rows: batchRows,
+          hasMore: pageCursor.hasMore,
+          continuation,
+          pageSize: limit,
+        };
+      }
 
       const before = { ...store.getState().sqlLab?.queries };
       const visible = (element: HTMLElement): boolean => element.getClientRects().length > 0;
@@ -126,9 +190,10 @@ export async function runInSqlLabChunk(baseSql: string, runId: string, path: str
       const deadline = Date.now() + 240_000;
       let queryId: string | undefined;
       let batchColumns: string[] = [];
-      const batchRows: unknown[][] = [];
+      let batchRows: unknown[][] = [];
       let complete = false;
       let hasMore = false;
+      let pageEnd = 0;
 
       while (Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 300));
@@ -152,24 +217,19 @@ export async function runInSqlLabChunk(baseSql: string, runId: string, path: str
         }
 
         batchColumns = cols;
-        // Bound the response before executeScript/Chrome messaging serializes it.
-        // A wide result may yield fewer rows than the SQL LIMIT; resume at the
-        // number actually delivered, never at the requested LIMIT.
-        const encoder = new TextEncoder();
-        const maxBytes = 2 * 1024 * 1024;
-        let bytes = encoder.encode(JSON.stringify(cols)).byteLength + 4096;
-        if (bytes >= maxBytes) throw new Error("Header hasil melebihi batas transfer 2 MiB.");
-        for (const row of data) {
-          const values = cols.map((name) => normalizeResultValue(row[name] ?? null));
-          const rowBytes = encoder.encode(JSON.stringify(values)).byteLength + 1;
-          if (bytes + rowBytes > maxBytes) {
-            if (batchRows.length === 0) throw new Error("Satu baris melebihi batas transfer 2 MiB.");
-            break;
-          }
-          batchRows.push(values);
-          bytes += rowBytes;
+        pageEnd = Math.min(data.length, limit);
+        batchRows = takeRows(cols, data, 0, pageEnd);
+        hasMore = data.length >= limit;
+        const continuation = batchRows.length < pageEnd;
+        if (continuation && queryId) {
+          runtimeWindow.__queryFlowPageCursors[runId] = {
+            offset,
+            queryId,
+            nextRow: batchRows.length,
+            pageEnd,
+            hasMore,
+          };
         }
-        hasMore = batchRows.length < data.length || data.length >= limit;
         complete = true;
         break;
       }
@@ -180,8 +240,16 @@ export async function runInSqlLabChunk(baseSql: string, runId: string, path: str
         stopButton?.click();
         throw new Error("Batas tunggu 4 menit tercapai; hasil chunk belum tersedia.");
       }
-      reportProgress("completed", iteration, offset + batchRows.length, batchRows.length);
-      return { ok: true, message: "Chunk diterima.", columns: batchColumns, rows: batchRows, hasMore };
+      reportProgress("completed", iteration, offset + batchRows.length, batchRows.length, offset, limit);
+      return {
+        ok: true,
+        message: "Chunk diterima.",
+        columns: batchColumns,
+        rows: batchRows,
+        hasMore,
+        continuation: batchRows.length < pageEnd,
+        pageSize: limit,
+      };
     } catch (error) {
       return { ok: false, message: error instanceof Error ? error.message : "Run gagal." };
     }
@@ -190,8 +258,12 @@ export async function runInSqlLabChunk(baseSql: string, runId: string, path: str
 
 /** Release cancellation state after the panel has finished exporting a run. */
 export function clearSqlLabRun(runId: string): void {
-  const runtimeWindow = window as typeof window & { __queryFlowCancelledRuns?: Record<string, boolean> };
+  const runtimeWindow = window as typeof window & {
+    __queryFlowCancelledRuns?: Record<string, boolean>;
+    __queryFlowPageCursors?: Record<string, { offset: number; queryId: string; nextRow: number; pageEnd: number; hasMore: boolean }>;
+  };
   delete runtimeWindow.__queryFlowCancelledRuns?.[runId];
+  delete runtimeWindow.__queryFlowPageCursors?.[runId];
 }
 
 /** Marks a QueryFlow run as cancelled and presses SQL Lab's visible Stop button when available. */

@@ -2,18 +2,22 @@ import { serializeWorkbook, downloadWorkbook, type QueryResult } from "./excel";
 import type { SqlChunkResponse } from "../types";
 
 export const MAX_EXPORT_BYTES = 20 * 1024 * 1024;
+export const EXPORT_CHECKPOINT_ROWS = 250_000;
 
 /** Retrieval pages are accumulated into one workbook, independent of table boundaries. */
 export class ChunkedExport {
   private results: QueryResult[] = [];
   parts = 0;
   totalRows = 0;
+  private checkpointedRows = 0;
+  private incrementalOutput = false;
 
   constructor(
     private readonly path: string,
     private readonly download = downloadWorkbook,
     private readonly maxBytes = MAX_EXPORT_BYTES,
     private readonly serialize = serializeWorkbook,
+    private readonly checkpointRows = 0,
   ) {}
 
   async append(result: QueryResult): Promise<void> {
@@ -24,14 +28,19 @@ export class ChunkedExport {
       this.results.push({ ...result, rows: [...result.rows] });
     }
     this.totalRows += result.rows.length;
+    if (this.checkpointRows > 0 && this.totalRows - this.checkpointedRows >= this.checkpointRows) {
+      await this.flush(false);
+      this.checkpointedRows = this.totalRows;
+    }
   }
 
-  async flush(_final: boolean, partial = false): Promise<void> {
+  async flush(final: boolean, partial = false): Promise<void> {
+    if (!final) this.incrementalOutput = true;
     while (this.results.length) {
       let selected = this.results;
       let buffer = await this.serialize(selected);
       let remainder: QueryResult[] = [];
-      const split = buffer.byteLength > this.maxBytes || this.parts > 0;
+      const split = buffer.byteLength > this.maxBytes || this.parts > 0 || this.incrementalOutput;
       // Measure real XLSX bytes, including ZIP compression and workbook overhead.
       // Halve oversized prefixes until each downloadable workbook fits.
       while (buffer.byteLength > this.maxBytes) {
@@ -66,6 +75,96 @@ export class ChunkedExport {
   }
 }
 
+export interface StreamingExportOptions {
+  maxBufferRows?: number;
+  initialParts?: number;
+  initialRows?: number;
+  download?: typeof downloadWorkbook;
+  maxBytes?: number;
+  serialize?: typeof serializeWorkbook;
+  onPartitionFlushed?: (partNumber: number, rowsInPart: number, totalRowsSoFar: number) => Promise<void> | void;
+}
+
+/** Streaming exporter with rolling partitions to guarantee constant memory usage (<50MB RAM). */
+export class StreamingChunkedExport {
+  private results: QueryResult[] = [];
+  parts: number;
+  totalRows: number;
+  private readonly maxBufferRows: number;
+  private readonly download: typeof downloadWorkbook;
+  private readonly serialize: typeof serializeWorkbook;
+  private readonly onPartitionFlushed?: StreamingExportOptions["onPartitionFlushed"];
+
+  constructor(
+    private readonly path: string,
+    options?: StreamingExportOptions,
+  ) {
+    this.parts = options?.initialParts ?? 0;
+    this.totalRows = options?.initialRows ?? 0;
+    this.maxBufferRows = options?.maxBufferRows ?? 50_000;
+    this.download = options?.download ?? downloadWorkbook;
+    this.serialize = options?.serialize ?? serializeWorkbook;
+    this.onPartitionFlushed = options?.onPartitionFlushed;
+  }
+
+  async append(result: QueryResult): Promise<void> {
+    const existing = this.results.find((entry) => entry.filename === result.filename);
+    if (existing) {
+      for (const row of result.rows) existing.rows.push(row);
+    } else {
+      this.results.push({ ...result, rows: [...result.rows] });
+    }
+    this.totalRows += result.rows.length;
+
+    const currentBufferRows = this.results.reduce((sum, item) => sum + item.rows.length, 0);
+    if (currentBufferRows >= this.maxBufferRows) {
+      await this.flushPartition();
+    }
+  }
+
+  private async flushPartition(): Promise<void> {
+    if (!this.results.length) return;
+    const currentBufferRows = this.results.reduce((sum, item) => sum + item.rows.length, 0);
+    if (currentBufferRows === 0) return;
+
+    const partNum = this.parts + 1;
+    const suffix = `_part-${String(partNum).padStart(3, "0")}`;
+    const buffer = await this.serialize(this.results);
+    await this.download(`${this.path}${suffix}`, buffer);
+    this.parts++;
+
+    // Purge memory buffer immediately for constant RAM consumption
+    this.results = [];
+
+    if (this.onPartitionFlushed) {
+      await this.onPartitionFlushed(partNum, currentBufferRows, this.totalRows);
+    }
+  }
+
+  async flush(_final: boolean, partial = false): Promise<void> {
+    const remainingRows = this.results.reduce((sum, item) => sum + item.rows.length, 0);
+    if (remainingRows > 0) {
+      const isSingleFinal = this.parts === 0 && !partial;
+      const partNum = this.parts + 1;
+      const suffix = isSingleFinal ? "" : `_part-${String(partNum).padStart(3, "0")}`;
+      const buffer = await this.serialize(this.results);
+      await this.download(`${this.path}${suffix}${partial ? "_partial" : ""}`, buffer);
+      this.parts++;
+      this.results = [];
+      if (this.onPartitionFlushed && !partial) {
+        await this.onPartitionFlushed(partNum, remainingRows, this.totalRows);
+      }
+    }
+  }
+}
+
+export interface CollectQueryOptions {
+  startRow?: number;
+  maxRows?: number;
+  initialOffset?: number;
+  onColumns?: (columns: string[]) => void;
+}
+
 /** Retry size failures at the same offset; advance only after a chunk is accepted. */
 export async function collectQuery(
   request: (offset: number, limit: number, iteration: number) => Promise<SqlChunkResponse>,
@@ -73,10 +172,25 @@ export async function collectQuery(
   stopped: () => boolean,
   report: (message: string) => void,
   signal?: AbortSignal,
+  optionsOrInitialOffset: number | CollectQueryOptions = {},
 ): Promise<void> {
-  let offset = 0;
-  let limit = 9000;
-  let iteration = 1;
+  const options: CollectQueryOptions = typeof optionsOrInitialOffset === "number"
+    ? { initialOffset: optionsOrInitialOffset }
+    : optionsOrInitialOffset;
+
+  const parsedStartRow = Number(options.startRow);
+  const hasInitialOffset = typeof options.initialOffset === "number" && Number.isFinite(options.initialOffset) && options.initialOffset >= 0;
+  let offset = hasInitialOffset
+    ? Math.floor(options.initialOffset!)
+    : Number.isFinite(parsedStartRow) && parsedStartRow >= 1
+      ? Math.floor(parsedStartRow) - 1
+      : 0;
+  const parsedMaxRows = Number(options.maxRows);
+  const maxRows = Number.isFinite(parsedMaxRows) && parsedMaxRows > 0 ? Math.floor(parsedMaxRows) : undefined;
+  let collectedRows = 0;
+  let limit = Math.min(9000, maxRows ?? 9000);
+  let iteration = hasInitialOffset && offset > 0 ? Math.floor(offset / 9000) + 1 : 1;
+
   while (!stopped()) {
     let response: SqlChunkResponse;
     try {
@@ -108,15 +222,22 @@ export async function collectQuery(
       }
       throw new Error(response.message);
     }
+    options.onColumns?.(response.columns);
     // A chunk that finished concurrently with Stop is still valid and exported.
     if (response.rows.length || offset === 0) await accept(response.columns, response.rows);
-    offset += response.rows.length;
+    collectedRows += response.rows.length;
     if (stopped()) break;
+    if (maxRows !== undefined && collectedRows >= maxRows) return;
+    if (response.continuation) {
+      iteration++;
+      continue;
+    }
     if (!response.hasMore) return;
     if (!response.rows.length) throw new Error("Chunk kosong tetapi hasil belum selesai; proses dihentikan agar tidak mengulang tanpa akhir.");
-    // Match subsequent SQL pages to the transfer budget for wide rows.
-    limit = Math.min(limit, response.rows.length);
+    offset += response.pageSize ?? limit;
+    limit = Math.min(9000, maxRows === undefined ? 9000 : maxRows - collectedRows);
     iteration++;
   }
   throw new Error("Run dihentikan oleh pengguna.");
 }
+

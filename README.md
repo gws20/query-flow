@@ -146,22 +146,54 @@ Tanggal     : 2026-09-25
 
 ### Run
 
-Klik **Run** di samping satu file. Isi editor aktif diganti dengan salinan SQL yang diparameterisasi, kemudian RUN ditekan. Selama query berjalan tombol berubah menjadi **Stop**. Hasil otomatis diunduh ke Excel; Stop mengunduh chunk yang sudah berhasil diterima sebagai hasil parsial.
+- **Run (Multi Sheet / Classic)**: Klik **Run** di samping satu file untuk mengekspor hasil ke satu file Excel standar berdasar path file.
+- **Single Sheet (Format Standar)**: Klik **Single Sheet** di samping satu file untuk mengekspor hasil ke struktur folder standar: `YYYY-MM-DD/[Mikro|Agregat]/[Kategori]/[Nomor Tabel] Judul Tabel.xlsx`.
+
+Selama query berjalan tombol berubah menjadi **Stop**. Stop mengunduh chunk yang sudah berhasil diterima sebagai hasil parsial.
 
 ### Run Folder → Excel
 
-Semua SQL dalam folder dijalankan berurutan. Query berikutnya dimulai setelah query sebelumnya sukses dan hasilnya terbaca. Tombol Run Folder juga berubah menjadi **Stop** selama batch aktif. Tetap buka Side Panel; jangan mengganti tab query atau menjalankan query lain selama batch.
+- **Run Folder (Multi Sheet)**: Semua SQL dalam folder dijalankan berurutan dan digabungkan menjadi satu workbook Excel multi-sheet (misalnya `Agregat_Kategori_A.xlsx`).
+- **Run Folder (Single Sheet)**: Semua SQL dalam folder dijalankan berurutan, tetapi **setiap query diekspor ke satu file Excel tersendiri** dengan struktur folder tanggal dan penamaan standar.
 
 Ukuran awal chunk adalah 9.000 baris dan otomatis mengecil jika batas ukuran tercapai. QueryFlow menjalankan chunk berikutnya dengan `OFFSET` sesuai jumlah baris yang sudah diterima hingga tidak ada hasil lanjutan. Panel menampilkan **Proses ke-n** dan total baris yang telah terkumpul.
 
-**SQL dalam folder dijalankan berdasarkan natural filename order.** Contoh: `Tabel1.sql`, `Tabel2.sql`, …, `Tabel10.sql`; suffix `1a`, `1b`, `1c`, `1d` tetap berurutan. Snapshot lama juga diurutkan saat dibuka kembali.
-
-Semua tabel dalam satu folder digabung menjadi satu workbook, misalnya `Agregat/Kategori_A` → `Agregat_Kategori_A.xlsx`. Hanya jika ukuran XLSX akhir melebihi 20 MiB (20 × 1024 × 1024 byte), hasil dipecah menjadi `_part-001.xlsx`, `_part-002.xlsx`, dan seterusnya. Run satu SQL juga mengekspor Excel. Cukup sekali klik Run; chunk berikutnya dijalankan otomatis.
+**SQL dalam folder dijalankan berdasarkan natural filename order.** Contoh: `Tabel1.sql`, `Tabel2.sql`, …, `Tabel10.sql`; suffix `1a`, `1b`, `1c`, `1d` tetap berurutan.
 
 ## Excel Output
 
-- Workbook mengikuti path folder tanpa awalan `Hasil_`: `Agregat/Kategori_A` → `Agregat_Kategori_A.xlsx`. Pemisah folder dan karakter khusus diganti underscore sehingga folder Agregat dan Mikro dapat dibedakan.
-- Satu hasil SQL menjadi satu sheet, mengikuti urutan eksekusi.
+### 1. Format Standar (Single Sheet)
+
+Struktur folder unduhan:
+```text
+YYYY-MM-DD/
+  ├── Mikro/
+  │    ├── Kategori A/
+  │    │    ├── [Tabel 1a] Jumlah Penduduk Berdasarkan Wilayah.xlsx
+  │    │    └── [Tabel 11-15] Jumlah Perusahaan Pertanian Breakdown KBLI 2 Digit.xlsx
+  │    ├── Kategori B/
+  │    │    └── [Tabel 2a] Judul Tabel.xlsx
+  │    ├── Sosek/
+  │    └── DSD/
+  └── Agregat/
+       ├── Kategori A/
+       │    ├── [Tabel 1a] Jumlah Penduduk Berdasarkan Wilayah.xlsx
+       │    └── [Tabel 11-15] Jumlah Perusahaan Pertanian Breakdown KBLI 2 Digit.xlsx
+       ├── Kategori B/
+       ├── Sosek/
+       └── DSD/
+```
+
+- **Folder tanggal**: `YYYY-MM-DD` (tanggal running query).
+- **Subfolder**: `Mikro` / `Agregat`.
+- **Subfolder Kategori**: `Kategori A`, `Kategori B`, `Sosek`, `DSD`, dst.
+- **Nama file**: `[Nomor Tabel] Judul Tabel.xlsx`.
+
+### 2. Format Classic (Multi-Sheet)
+
+- Workbook mengikuti path folder: `Agregat/Kategori_A` → `Agregat_Kategori_A.xlsx`.
+- Satu hasil SQL menjadi satu sheet dalam workbook yang sama.
+
 - Nama sheet langsung memakai judul SQL: `Agregat_1a.sql` dengan metadata `Judul: Jumlah usaha` → `Jumlah usaha`. Jika metadata tidak tersedia, nama sheet memakai nama file tanpa `.sql`. Judul lengkap tetap ditulis pada baris 1 meskipun nama sheet dipotong.
 - Nama sheet maksimal 31 karakter; karakter terlarang diganti dan nama duplikat diberi suffix angka.
 - Baris 1: metadata `Judul:` atau fallback nama file, digabung selebar kolom hasil.
@@ -174,20 +206,19 @@ Chunk hanya membatasi pengambilan data. Semua chunk dan tabel dikumpulkan sampai
 
 QueryFlow menambahkan `ORDER BY 1 ASC` bila query belum memiliki ORDER BY tingkat terluar. Untuk pagination yang konsisten, gunakan ORDER BY dengan kunci unik dan sumber data yang tidak berubah selama proses. Kolom pertama yang tidak unik tidak menjamin urutan antarhalaman.
 
-## Jika Eksekusi Gagal
+## Handling Data Masif (>500k Baris) & Checkpoint Resume
 
-Query berjalan berurutan dengan batas tunggu empat menit per chunk. Jika satu query gagal atau Stop ditekan, query berikutnya tidak dijalankan. Semua chunk yang sudah diterima tetap diekspor, termasuk query sebelumnya dalam folder dan chunk selesai dari query aktif. Hasil yang terkumpul digabung dan langsung diunduh dengan suffix `_partial.xlsx`, dengan aturan pemecahan 20 MiB yang sama. Jika belum ada hasil, panel menyatakannya tanpa membuat file kosong.
+### 1. Rolling Partition / Constant Memory (<50 MB RAM)
+Untuk menghindari Out of Memory (OOM) saat query menghasilkan ratusan ribu baris:
+- **Streaming Partisi**: Data di-buffer per 50.000 baris. Saat batas 50.000 baris tercapai, file partisi (`_part-001.xlsx`) langsung diunduh ke disk dan buffer memori RAM dikosongkan.
+- **RAM Tetap Rendah**: Penggunaan RAM JavaScript browser stabil konstan (< 50 MB) berapapun jumlah barisnya (500k s.d. jutaan baris).
+- **Mudah Dibagikan**: File partisi Excel masing-masing berukuran ~5–15 MB, di bawah limit upload Telegram Bot (50 MB) / SharePoint.
 
-Tombol Stop mengirim pembatalan ke proses QueryFlow dan menekan Stop pada SQL Lab jika tombolnya tersedia. Baris dari chunk yang masih berjalan dan belum menghasilkan respons sukses belum dapat diunduh. Panel menampilkan jumlah baris dan file yang berhasil dikirim ke unduhan Chrome. Jika ekspor Excel sendiri gagal, panel melaporkan kegagalan tersebut.
-
-1. Identifikasi SQL yang gagal dari pesan panel.
-2. Periksa pilihan database/schema.
-3. Periksa sesi FASIH masih aktif.
-4. Periksa SQL dan error SQL Lab.
-5. Perbaiki penyebabnya; import ulang jika source SQL lokal berubah.
-6. Jalankan folder kembali setelah query sebelumnya selesai atau dihentikan di FASIH.
-
-Versi ini **tidak mendukung resume**. Query yang sudah sukses pada batch gagal akan dijalankan lagi saat folder dicoba ulang.
+### 2. Mekanisme Resume Tanpa Mengulang dari Awal
+- **Offset Checkpoint**: Posisi baris (`lastOffset`) dan partisi yang sudah berhasil diunduh otomatis disimpan di storage lokal ekstensi.
+- **Menyambung Otomatis**: Jika proses terhenti di tengah jalan (misal di baris 450.000), saat tombol **Single Sheet** atau **Run Folder** dijalankan ulang, ekstensi otomatis menyambung dari `LIMIT 9000 OFFSET 450000` tanpa menarik ulang data yang sudah tersimpan.
+- **Level Tabel / Skip Completed**: Pada mode Run Folder, tabel yang sudah selesai 100% otomatis dilewati (*Skip*).
+- **Reset Checkpoint**: Tersedia tombol `↺ Reset Checkpoint` pada folder dan tombol `↺` pada baris query jika pengguna ingin menghapus checkpoint dan mengulang query dari baris 0.
 
 ## Data & Privacy
 

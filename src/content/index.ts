@@ -27,3 +27,39 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
     );
   return true;
 });
+
+// Detect Transdata session if loaded on transdata-cloud.bps.go.id
+if (window.location.hostname === "transdata-cloud.bps.go.id") {
+  const detectAndSendSession = () => {
+    const head = document.querySelector("head");
+    const body = document.querySelector("body");
+    const win = window as unknown as {
+      oc_config?: { currentUser?: string };
+      OC?: { currentUser?: string; requestToken?: string };
+      oc_requesttoken?: string;
+    };
+    const userId =
+      head?.getAttribute("data-user") ||
+      body?.getAttribute("data-user") ||
+      win.oc_config?.currentUser ||
+      win.OC?.currentUser ||
+      null;
+    const requestToken =
+      head?.getAttribute("data-requesttoken") ||
+      body?.getAttribute("data-requesttoken") ||
+      win.oc_requesttoken ||
+      win.OC?.requestToken ||
+      null;
+
+    if (userId && requestToken) {
+      void chrome.runtime.sendMessage({
+        type: "TRANSDATA_SESSION_DETECTED",
+        session: { userId, requestToken, lastDetected: new Date().toISOString() },
+      } satisfies ExtensionMessage).catch(() => undefined);
+    }
+  };
+
+  detectAndSendSession();
+  window.addEventListener("DOMContentLoaded", detectAndSendSession);
+  window.addEventListener("load", detectAndSendSession);
+}
